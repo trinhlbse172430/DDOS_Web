@@ -1,7 +1,6 @@
 import dash
 from dash import dcc, html, Input, Output, State, callback_context, no_update
 import dash_bootstrap_components as dbc
-from flask import app
 import pandas as pd
 import numpy as np
 import joblib
@@ -23,7 +22,7 @@ ddos_app = dash.Dash(
     external_stylesheets=[dbc.themes.BOOTSTRAP],
     suppress_callback_exceptions=True,
 )
-server = ddos_app.server
+app = ddos_app.server
 ddos_app.title = "ML-DDoS Detector"
 
 # =============================================================================
