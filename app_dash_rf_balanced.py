@@ -16,7 +16,7 @@ from urllib.parse import quote
 # =============================================================================
 # 1. APP INITIALIZATION
 # =============================================================================
-_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+_BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 app = dash.Dash(
     __name__,
     external_stylesheets=[dbc.themes.BOOTSTRAP],
