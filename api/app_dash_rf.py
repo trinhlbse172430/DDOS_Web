@@ -1,6 +1,7 @@
 import dash
 from dash import dcc, html, Input, Output, State, callback_context, no_update
 import dash_bootstrap_components as dbc
+from flask import app
 import pandas as pd
 import numpy as np
 import joblib
@@ -17,13 +18,13 @@ from urllib.parse import quote
 # 1. APP INITIALIZATION
 # =============================================================================
 _BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-app = dash.Dash(
+ddos_app = dash.Dash(
     __name__,
     external_stylesheets=[dbc.themes.BOOTSTRAP],
     suppress_callback_exceptions=True,
 )
-server = app.server
-app.title = "ML-DDoS Detector"
+server = ddos_app.server
+ddos_app.title = "ML-DDoS Detector"
 
 # =============================================================================
 # 2. LOAD MODEL 
@@ -309,7 +310,7 @@ def create_feature_importance():
 # =============================================================================
 # 5. MAIN LAYOUT
 # =============================================================================
-app.layout = html.Div([
+ddos_app.layout = html.Div([
 
     # ─── Fixed analysis-complete toast overlay ───────────────────
     # Displayed in the centre of the viewport by the clientside callback
@@ -913,7 +914,7 @@ app.layout = html.Div([
 # =============================================================================
 
 # ─── Navigation (clientside — instant, no server round-trip) ────
-app.clientside_callback(
+ddos_app.clientside_callback(
     """
     function(n1, n2, n3) {
         const ctx = dash_clientside.callback_context;
@@ -942,7 +943,7 @@ app.clientside_callback(
 )
 
 # ─── Threshold Display (clientside — instant) ───────────────────
-app.clientside_callback(
+ddos_app.clientside_callback(
     """
     function(value) { return value.toFixed(2); }
     """,
@@ -951,7 +952,7 @@ app.clientside_callback(
 )
 
 # ─── Show File Info on Upload ───────────────────────────────────
-@app.callback(
+@ddos_app.callback(
     Output('file-info', 'children'),
     [Input('upload-data', 'contents')],
     [State('upload-data', 'filename')]
@@ -989,7 +990,7 @@ def show_file_info(contents, filename):
 
 # ─── Whitelist confirmation flow ────────────────────────────────
 # Handles: scan-button click, modal Confirm, modal Cancel
-@app.callback(
+@ddos_app.callback(
     [Output('wl-confirm-modal', 'is_open'),
      Output('_do-analysis', 'data'),
      Output('whitelist-input', 'value')],
@@ -1028,7 +1029,7 @@ def handle_scan_flow(scan_clicks, confirm_clicks, cancel_clicks,
     return no_update, no_update, no_update
 
 # ─── Process File & Generate Results ────────────────────────────
-@app.callback(
+@ddos_app.callback(
     [Output('results-section', 'children'),
      Output('stored-data', 'data'),
      Output('scan-metrics', 'data')],
@@ -1978,7 +1979,7 @@ def build_full_tab(df):
 # ─── Clientside callback: show centred toast then scroll to results ───────
 # When results-section gets new children (analysis finished), pop up a
 # centred overlay toast for ~3 s, then smoothly scroll to results.
-app.clientside_callback(
+ddos_app.clientside_callback(
     """
     function(children) {
         if (!children || children === null) return null;
@@ -2014,7 +2015,7 @@ app.clientside_callback(
 )
 
 # ─── Clientside callback: toggle Linux / Windows download rows ───
-app.clientside_callback(
+ddos_app.clientside_callback(
     """
     function(os) {
         if (os === 'windows') {
@@ -2032,4 +2033,4 @@ app.clientside_callback(
 # 9. RUN
 # =============================================================================
 if __name__ == '__main__':
-    app.run(debug=True, port=8051, use_reloader=False)
+    ddos_app.run(debug=True, port=8051, use_reloader=False)
