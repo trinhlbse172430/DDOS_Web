@@ -630,6 +630,129 @@ body {
 
 .results-metrics-row {
     margin-bottom: 2rem;
+    display: flex;
+    flex-wrap: nowrap;
+}
+.results-metrics-row > .col-3 {
+    display: flex;
+}
+.results-metrics-row .r-metric-card {
+    width: 100%;
+    min-height: 160px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+}
+
+/* ─── ANALYSIS TOAST (fixed centred overlay) ───────────────────── */
+#analysis-toast {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    z-index: 9999;
+    display: none;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    padding: 2rem 3.2rem;
+    min-width: 340px;
+    background: linear-gradient(135deg, rgba(15, 23, 42, 0.97), rgba(17, 24, 39, 0.97));
+    border: 1px solid rgba(74, 222, 128, 0.45);
+    border-radius: 20px;
+    box-shadow: 0 25px 70px rgba(0, 0, 0, 0.65), 0 0 40px rgba(74, 222, 128, 0.18);
+    backdrop-filter: blur(14px);
+    pointer-events: none;
+}
+#analysis-toast.toast-show {
+    display: flex;
+    animation: toastIn 0.35s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+}
+#analysis-toast.toast-hide {
+    display: flex;
+    animation: toastOut 0.45s ease forwards;
+}
+@keyframes toastIn {
+    from { opacity: 0; transform: translate(-50%, -50%) scale(0.75); }
+    to   { opacity: 1; transform: translate(-50%, -50%) scale(1);    }
+}
+@keyframes toastOut {
+    from { opacity: 1; transform: translate(-50%, -50%) scale(1);    }
+    to   { opacity: 0; transform: translate(-50%, -50%) scale(0.88); }
+}
+
+/* ─── WHITELIST CONFIRMATION MODAL (dark theme) ────────────────── */
+.wl-modal-dark .modal-content {
+    background: linear-gradient(135deg, #0F172A 0%, #111827 100%);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 16px;
+    box-shadow: 0 25px 70px rgba(0, 0, 0, 0.7), 0 0 40px rgba(0, 0, 0, 0.3);
+    color: #E2E8F0;
+}
+.wl-modal-dark .modal-backdrop.show {
+    opacity: 0.7;
+}
+.wl-modal-header {
+    background: transparent;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    padding: 1.2rem 1.5rem;
+}
+.wl-modal-header .modal-title {
+    color: #FBBF24;
+    font-size: 1.1rem;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+}
+.wl-modal-header .btn-close {
+    filter: invert(1);
+}
+.wl-modal-body {
+    padding: 1.5rem;
+    color: #E2E8F0;
+}
+.wl-modal-footer {
+    background: transparent;
+    border-top: 1px solid rgba(255, 255, 255, 0.08);
+    padding: 1rem 1.5rem;
+}
+.wl-modal-footer .btn-secondary {
+    background: transparent;
+    border-color: rgba(255, 255, 255, 0.2);
+    color: rgba(255, 255, 255, 0.7);
+}
+.wl-modal-footer .btn-secondary:hover {
+    background: rgba(255, 255, 255, 0.08);
+    border-color: rgba(255, 255, 255, 0.3);
+    color: #fff;
+}
+.wl-modal-footer .btn-success {
+    background: #059669;
+    border-color: #059669;
+    font-weight: 600;
+}
+.wl-modal-footer .btn-success:hover {
+    background: #047857;
+    border-color: #047857;
+}
+
+/* ─── ANALYSIS COMPLETE BANNER ──────────────────────────────────── */
+.analysis-complete-banner {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0.85rem 1.5rem;
+    margin-bottom: 1.5rem;
+    background: rgba(74, 222, 128, 0.06);
+    border: 1px solid rgba(74, 222, 128, 0.2);
+    border-radius: 12px;
+    font-size: 0.95rem;
+    animation: bannerPulse 2s ease-in-out;
+}
+@keyframes bannerPulse {
+    0% { opacity: 0; transform: translateY(-10px); }
+    100% { opacity: 1; transform: translateY(0); }
 }
 
 .r-metric-card {
@@ -1669,4 +1792,59 @@ input.dash-input-container[type="number"] {
     visibility: hidden !important;
     position: absolute !important;
     pointer-events: none !important;
+}
+
+/* ─── WHITELIST TEXTAREA ───────────────────────────────────────── */
+#whitelist-input::placeholder {
+    color: rgba(255, 255, 255, 0.2);
+}
+#whitelist-input:focus {
+    outline: none;
+    border-color: rgba(59, 130, 246, 0.55) !important;
+    box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.12);
+}
+
+/* ─── MITIGATION OS RADIO GROUP ────────────────────────────────── */
+.os-radio-group {
+    display: flex;
+    gap: 1rem;
+}
+.os-radio-group .form-check {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.4rem 0.85rem;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.03);
+    cursor: pointer;
+    transition: all 0.25s ease;
+}
+.os-radio-group .form-check:hover {
+    border-color: rgba(59, 130, 246, 0.4);
+    background: rgba(59, 130, 246, 0.06);
+}
+.os-radio-group .form-check-input {
+    accent-color: #3B82F6;
+    margin: 0;
+    cursor: pointer;
+}
+.os-radio-group .form-check-input:checked + .form-check-label {
+    color: #60A5FA;
+    font-weight: 600;
+}
+.os-radio-group .form-check-label {
+    color: rgba(255, 255, 255, 0.65);
+    font-size: 0.82rem;
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+/* ─── MITIGATION TOOLS SECTION (inside Blacklist tab) ──────────── */
+.mitigation-tools-section {
+    margin-top: 1rem;
+    padding: 1.2rem 1.3rem;
+    background: rgba(255, 255, 255, 0.025);
+    border: 1px solid rgba(255, 255, 255, 0.07);
+    border-radius: 12px;
 }

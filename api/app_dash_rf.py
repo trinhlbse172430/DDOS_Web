@@ -10,23 +10,23 @@ from datetime import datetime
 import base64
 import io
 import os
+import ipaddress
+from urllib.parse import quote
 
 # =============================================================================
-# 1. KHỞI TẠO APP
+# 1. APP INITIALIZATION
 # =============================================================================
-_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-
+_BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 app = dash.Dash(
     __name__,
     external_stylesheets=[dbc.themes.BOOTSTRAP],
-    suppress_callback_exceptions=True
-    
+    suppress_callback_exceptions=True,
 )
 server = app.server
 app.title = "ML-DDoS Detector"
 
 # =============================================================================
-# 2. TẢI MODEL 
+# 2. LOAD MODEL 
 # =============================================================================
 MODEL_PATH = os.path.join(_BASE_DIR, "model", "rf_src_ip_model.pkl")
 
@@ -75,7 +75,7 @@ def _detect_model_name(m):
 MODEL_NAME = _detect_model_name(model)
 
 # =============================================================================
-# 3. XỬ LÝ DỮ LIỆU 
+# 3. DATA PROCESSING 
 # =============================================================================
 
 def build_features(df):
@@ -86,42 +86,72 @@ def build_features(df):
       dst_port_ratio, mean_iat, avg_idle, size_consistency,
       dst_ip_ratio, active_duration_sec
     """
-    # 1. Parse Timestamp
-    try:
-        df["Timestamp"] = pd.to_datetime(df["Timestamp"], format="%d/%m/%Y %I:%M:%S %p", errors="coerce")
-    except Exception:
-        df["Timestamp"] = pd.to_datetime(df["Timestamp"], errors="coerce")
+    # ── Column name normalisation: strip whitespace from headers ──
+    df.columns = df.columns.str.strip()
 
-    # 2. Aggregate per Source IP  (17 raw aggregation columns)
-    src_features = df.groupby("Src IP").agg(
-        total_flows     = ("Flow ID",       "count"),
-        total_fwd_pkts  = ("Tot Fwd Pkts",  "sum"),
-        total_bwd_pkts  = ("Tot Bwd Pkts",  "sum"),
-        total_fwd_bytes = ("TotLen Fwd Pkts","sum"),
-        total_bwd_bytes = ("TotLen Bwd Pkts","sum"),
-        unique_dst_ips  = ("Dst IP",        "nunique"),
-        unique_dst_ports= ("Dst Port",      "nunique"),
-        mean_flow_duration=("Flow Duration", "mean"),
-        mean_iat        = ("Flow IAT Mean", "mean"),
-        avg_idle        = ("Idle Mean",     "mean"),
-        first_seen      = ("Timestamp",     "min"),
-        last_seen       = ("Timestamp",     "max"),
-        avg_pkt_size    = ("Pkt Size Avg",  "mean"),
-        std_pkt_len     = ("Pkt Len Std",   "mean"),
-        total_syn_flags = ("SYN Flag Cnt",  "sum"),
-        total_ack_flags = ("ACK Flag Cnt",  "sum"),
-        total_rst_flags = ("RST Flag Cnt",  "sum"),
-    ).reset_index()
+    # ── Helper: safe aggregation — uses column only if it exists ──
+    def _safe_agg(col, func, fallback=0):
+        """Return (col, func) tuple if col present, else add synthetic column of fallback value."""
+        if col in df.columns:
+            return col, func
+        df[f'__missing_{col}'] = fallback
+        return f'__missing_{col}', func
+
+    # 1. Parse Timestamp (optional — used only for first_seen / last_seen / active_duration)
+    _has_timestamp = "Timestamp" in df.columns
+    if _has_timestamp:
+        try:
+            df["Timestamp"] = pd.to_datetime(df["Timestamp"], format="%d/%m/%Y %I:%M:%S %p", errors="coerce")
+        except Exception:
+            df["Timestamp"] = pd.to_datetime(df["Timestamp"], errors="coerce")
+
+    # 2. Aggregate per Source IP
+    # For Flow ID counter: if missing, use any column as proxy count
+    _flow_id_col = "Flow ID" if "Flow ID" in df.columns else df.columns[0]
+
+    agg_kwargs = dict(
+        total_flows      = (_flow_id_col,        "count"),
+        total_fwd_pkts   = _safe_agg("Tot Fwd Pkts",   "sum", 0),
+        total_bwd_pkts   = _safe_agg("Tot Bwd Pkts",   "sum", 0),
+        total_fwd_bytes  = _safe_agg("TotLen Fwd Pkts", "sum", 0),
+        total_bwd_bytes  = _safe_agg("TotLen Bwd Pkts", "sum", 0),
+        unique_dst_ips   = _safe_agg("Dst IP",         "nunique", 1),
+        unique_dst_ports = _safe_agg("Dst Port",       "nunique", 1),
+        mean_flow_duration = _safe_agg("Flow Duration", "mean", 0),
+        mean_iat         = _safe_agg("Flow IAT Mean",  "mean", 0),
+        avg_idle         = _safe_agg("Idle Mean",      "mean", 0),
+        avg_pkt_size     = _safe_agg("Pkt Size Avg",   "mean", 0),
+        std_pkt_len      = _safe_agg("Pkt Len Std",    "mean", 0),
+        total_syn_flags  = _safe_agg("SYN Flag Cnt",   "sum", 0),
+        total_ack_flags  = _safe_agg("ACK Flag Cnt",   "sum", 0),
+        total_rst_flags  = _safe_agg("RST Flag Cnt",   "sum", 0),
+    )
+    # Add Timestamp-dependent aggregations only if column exists
+    if _has_timestamp:
+        agg_kwargs['first_seen'] = ("Timestamp", "min")
+        agg_kwargs['last_seen']  = ("Timestamp", "max")
+
+    src_features = df.groupby("Src IP").agg(**agg_kwargs).reset_index()
+    # Drop synthetic fallback columns
+    src_features.drop(columns=[c for c in src_features.columns if c.startswith('__missing_')], inplace=True)
 
     src_ip_dataset = src_features.copy()
 
     # 3. Active duration
-    duration = (src_ip_dataset["last_seen"] - src_ip_dataset["first_seen"]).dt.total_seconds()
-    src_ip_dataset["active_duration_sec"] = duration.clip(lower=1)
-
-    # Convert timestamps to string to avoid PyArrow issues downstream
-    src_ip_dataset["first_seen"] = src_ip_dataset["first_seen"].astype(str)
-    src_ip_dataset["last_seen"]  = src_ip_dataset["last_seen"].astype(str)
+    if _has_timestamp and 'first_seen' in src_ip_dataset.columns and 'last_seen' in src_ip_dataset.columns:
+        duration = (src_ip_dataset["last_seen"] - src_ip_dataset["first_seen"]).dt.total_seconds()
+        src_ip_dataset["active_duration_sec"] = duration.clip(lower=1)
+        src_ip_dataset["first_seen"] = src_ip_dataset["first_seen"].astype(str)
+        src_ip_dataset["last_seen"]  = src_ip_dataset["last_seen"].astype(str)
+    elif "mean_flow_duration" in src_ip_dataset.columns:
+        src_ip_dataset["active_duration_sec"] = src_ip_dataset["mean_flow_duration"].clip(lower=1e-6) / 1e6
+        src_ip_dataset["active_duration_sec"] = src_ip_dataset["active_duration_sec"].clip(lower=1)
+        src_ip_dataset["first_seen"] = "N/A"
+        src_ip_dataset["last_seen"]  = "N/A"
+    else:
+        src_ip_dataset["active_duration_sec"] = 1.0
+        src_ip_dataset["first_seen"] = "N/A"
+        src_ip_dataset["last_seen"]  = "N/A"
 
     # 4. Derived Behavioral Features
     # -- Volumetric --
@@ -281,6 +311,23 @@ def create_feature_importance():
 # =============================================================================
 app.layout = html.Div([
 
+    # ─── Fixed analysis-complete toast overlay ───────────────────
+    # Displayed in the centre of the viewport by the clientside callback
+    # whenever analysis finishes, then auto-dismissed after ~3 s.
+    html.Div([
+        html.Div("✅", style={'fontSize': '2.5rem', 'marginBottom': '0.6rem'}),
+        html.Div("Analysis Complete!", style={
+            'fontWeight': '700', 'fontSize': '1.35rem', 'color': '#4ADE80',
+            'marginBottom': '0.35rem',
+        }),
+        html.Div("Scrolling to results...", style={
+            'color': 'rgba(255,255,255,0.55)', 'fontSize': '0.88rem',
+        }),
+    ], id='analysis-toast'),
+
+    # Hidden store used as dummy Output for the toast clientside callback
+    dcc.Store(id='_toast-trigger'),
+
     # ─── NAVIGATION BAR ─────────────────────────────────────────
     html.Nav([
         html.Div([
@@ -351,14 +398,14 @@ app.layout = html.Div([
                 html.Div([
                     html.Div([
                         html.Span("🎯 Detection Threshold", className="threshold-label"),
-                        html.Span(id='threshold-value', children="0.20", className="threshold-val-badge"),
+                        html.Span(id='threshold-value', children="0.25", className="threshold-val-badge"),
                     ], className="threshold-header-row"),
                     dcc.Slider(
                         id='threshold-slider',
                         min=0.01,
                         max=1.0,
                         step=0.01,
-                        value=0.20,
+                        value=0.25,
                         marks={
                             0.01: {'label': '1%',  'style': {'color': 'rgba(255,255,255,0.45)'}},
                             0.25: {'label': '25%', 'style': {'color': 'rgba(255,255,255,0.45)'}},
@@ -371,6 +418,33 @@ app.layout = html.Div([
                     html.Div(
                         "⬇ Lower = more sensitive (more alerts)   |   ⬆ Higher = fewer false positives",
                         className="threshold-hint-text"
+                    ),
+                ], className="threshold-section"),
+
+                # ── Whitelist (Safe IPs) ──
+                html.Div([
+                    html.Div([
+                        html.Span("🛡️", style={'fontSize': '1.1rem', 'marginRight': '0.45rem'}),
+                        html.Span("Whitelist (Safe IPs)", className="threshold-label"),
+                    ], style={'display': 'flex', 'alignItems': 'center', 'marginBottom': '0.5rem'}),
+                    html.P(
+                        "IPs in this list will be marked as safe regardless of ML prediction.",
+                        style={'color': 'rgba(255,255,255,0.35)', 'fontSize': '0.75rem',
+                               'margin': '0 0 0.5rem 0'}
+                    ),
+                    dcc.Textarea(
+                        id='whitelist-input',
+                        value='',
+                        placeholder='Enter safe IPs (one per line):\n192.168.10.1\n8.8.8.8',
+                        style={
+                            'width': '100%', 'height': '90px',
+                            'backgroundColor': 'rgba(255,255,255,0.04)',
+                            'border': '1px solid rgba(255,255,255,0.1)',
+                            'borderRadius': '8px', 'color': '#fff',
+                            'padding': '0.6rem 0.8rem', 'fontSize': '0.85rem',
+                            'fontFamily': 'JetBrains Mono, monospace',
+                            'resize': 'vertical',
+                        },
                     ),
                 ], className="threshold-section"),
 
@@ -489,7 +563,7 @@ app.layout = html.Div([
                     ], className="sw-section"),
                 ], className="model-card"),
 
-                # ── Random Forest  ──
+                # ── Random Forest (Best) ──
                 html.Div([
                     html.Div([
                         html.Div([
@@ -785,6 +859,52 @@ app.layout = html.Div([
     # ─── HIDDEN STORES ───────────────────────────────────────────
     dcc.Store(id='stored-data'),
     dcc.Store(id='scan-metrics', data=None),
+    dcc.Store(id='_do-analysis', data=0),
+
+    # ─── WHITELIST CONFIRMATION MODAL ────────────────────────────
+    dbc.Modal([
+        dbc.ModalHeader(
+            dbc.ModalTitle([
+                html.Span("⚠️", style={'marginRight': '0.5rem'}),
+                "Whitelist Confirmation",
+            ]),
+            close_button=False,
+            className="wl-modal-header",
+        ),
+        dbc.ModalBody(
+            html.Div([
+                html.P(
+                    "You have entered IP addresses in the Whitelist.",
+                    style={'fontWeight': '600', 'marginBottom': '0.6rem',
+                           'fontSize': '0.95rem'},
+                ),
+                html.P(
+                    "These IPs will be marked as safe regardless of ML prediction results. "
+                    "Are you sure you want to proceed?",
+                    style={'color': 'rgba(255,255,255,0.6)', 'fontSize': '0.88rem',
+                           'lineHeight': '1.5'},
+                ),
+            ]),
+            className="wl-modal-body",
+        ),
+        dbc.ModalFooter([
+            dbc.Button(
+                "Cancel",
+                id="wl-cancel-btn",
+                n_clicks=0,
+                className="me-2",
+                color="secondary",
+                outline=True,
+            ),
+            dbc.Button(
+                [html.Span("✅", style={'marginRight': '0.4rem'}), "Confirm & Analyze"],
+                id="wl-confirm-btn",
+                n_clicks=0,
+                color="success",
+            ),
+        ], className="wl-modal-footer"),
+    ], id="wl-confirm-modal", is_open=False, centered=True, backdrop="static",
+       className="wl-modal-dark"),
 
 ], className="app-wrapper")
 
@@ -792,8 +912,24 @@ app.layout = html.Div([
 # 6. CALLBACKS
 # =============================================================================
 
-# ─── Navigation ─────────────────────────────────────────────────
-@app.callback(
+# ─── Navigation (clientside — instant, no server round-trip) ────
+app.clientside_callback(
+    """
+    function(n1, n2, n3) {
+        const ctx = dash_clientside.callback_context;
+        let idx = 0;
+        if (ctx.triggered.length) {
+            const btnId = ctx.triggered[0].prop_id.split('.')[0];
+            const map = {'nav-btn-detection': 0, 'nav-btn-models': 1, 'nav-btn-about': 2};
+            idx = (btnId in map) ? map[btnId] : 0;
+        }
+        const styles = [{display:'none'}, {display:'none'}, {display:'none'}];
+        const classes = ['nav-link', 'nav-link', 'nav-link'];
+        styles[idx] = {display: 'block'};
+        classes[idx] = 'nav-link active';
+        return styles.concat(classes);
+    }
+    """,
     [Output('page-detection', 'style'),
      Output('page-models', 'style'),
      Output('page-about', 'style'),
@@ -802,38 +938,17 @@ app.layout = html.Div([
      Output('nav-btn-about', 'className')],
     [Input('nav-btn-detection', 'n_clicks'),
      Input('nav-btn-models', 'n_clicks'),
-     Input('nav-btn-about', 'n_clicks')]
+     Input('nav-btn-about', 'n_clicks')],
 )
-def navigate(n1, n2, n3):
-    ctx = callback_context
-    if not ctx.triggered:
-        return ({'display': 'block'}, {'display': 'none'}, {'display': 'none'},
-                'nav-link active', 'nav-link', 'nav-link')
 
-    button_id = ctx.triggered[0]['prop_id'].split('.')[0]
-
-    page_map = {
-        'nav-btn-detection': 0,
-        'nav-btn-models': 1,
-        'nav-btn-about': 2,
-    }
-
-    styles = [{'display': 'none'}] * 3
-    classes = ['nav-link'] * 3
-
-    idx = page_map.get(button_id, 0)
-    styles[idx] = {'display': 'block'}
-    classes[idx] = 'nav-link active'
-
-    return tuple(styles + classes)
-
-# ─── Threshold Display ──────────────────────────────────────────
-@app.callback(
+# ─── Threshold Display (clientside — instant) ───────────────────
+app.clientside_callback(
+    """
+    function(value) { return value.toFixed(2); }
+    """,
     Output('threshold-value', 'children'),
-    Input('threshold-slider', 'value')
+    Input('threshold-slider', 'value'),
 )
-def update_threshold(value):
-    return f"{value:.2f}"  # displayed inside threshold-val-badge
 
 # ─── Show File Info on Upload ───────────────────────────────────
 @app.callback(
@@ -872,18 +987,60 @@ def show_file_info(contents, filename):
     except Exception:
         return html.Div("File uploaded", style={'color': '#4ADE80'})
 
+# ─── Whitelist confirmation flow ────────────────────────────────
+# Handles: scan-button click, modal Confirm, modal Cancel
+@app.callback(
+    [Output('wl-confirm-modal', 'is_open'),
+     Output('_do-analysis', 'data'),
+     Output('whitelist-input', 'value')],
+    [Input('scan-button', 'n_clicks'),
+     Input('wl-confirm-btn', 'n_clicks'),
+     Input('wl-cancel-btn', 'n_clicks')],
+    [State('whitelist-input', 'value'),
+     State('_do-analysis', 'data')],
+    prevent_initial_call=True,
+)
+def handle_scan_flow(scan_clicks, confirm_clicks, cancel_clicks,
+                     whitelist_text, current_count):
+    ctx = callback_context
+    if not ctx.triggered:
+        return no_update, no_update, no_update
+
+    trigger = ctx.triggered[0]['prop_id'].split('.')[0]
+    cnt = (current_count or 0)
+
+    if trigger == 'scan-button':
+        has_wl = bool(whitelist_text and whitelist_text.strip())
+        if has_wl:
+            # Whitelist not empty → show confirmation modal
+            return True, no_update, no_update
+        # Whitelist empty → skip modal, trigger analysis directly
+        return False, cnt + 1, no_update
+
+    if trigger == 'wl-confirm-btn':
+        # User confirmed → close modal + trigger analysis
+        return False, cnt + 1, no_update
+
+    if trigger == 'wl-cancel-btn':
+        # User cancelled → close modal + clear whitelist
+        return False, no_update, ''
+
+    return no_update, no_update, no_update
+
 # ─── Process File & Generate Results ────────────────────────────
 @app.callback(
     [Output('results-section', 'children'),
      Output('stored-data', 'data'),
      Output('scan-metrics', 'data')],
-    [Input('scan-button', 'n_clicks')],
+    [Input('_do-analysis', 'data')],
     [State('upload-data', 'contents'),
      State('upload-data', 'filename'),
-     State('threshold-slider', 'value')]
+     State('threshold-slider', 'value'),
+     State('whitelist-input', 'value')],
+    prevent_initial_call=True,
 )
-def process_file(n_clicks, contents, filename, threshold):
-    if n_clicks == 0 or contents is None:
+def process_file(analysis_trigger, contents, filename, threshold, whitelist_text):
+    if not analysis_trigger or contents is None:
         return (no_update, no_update, no_update)
 
     try:
@@ -901,6 +1058,38 @@ def process_file(n_clicks, contents, filename, threshold):
 
         raw_count = len(df)
 
+        # ── Pre-validate: check minimum required columns ──
+        REQUIRED_COLS = ['Src IP']
+        RECOMMENDED_COLS = ['Dst IP', 'Flow Duration', 'Tot Fwd Pkts', 'Tot Bwd Pkts',
+                             'SYN Flag Cnt', 'ACK Flag Cnt', 'Flow IAT Mean', 'Idle Mean']
+        df.columns = df.columns.str.strip()  # normalise header whitespace
+        missing_required = [c for c in REQUIRED_COLS if c not in df.columns]
+        if missing_required:
+            missing_rec = [c for c in RECOMMENDED_COLS if c not in df.columns]
+            err_lines = [
+                html.Div([
+                    html.Span("❌ ", style={'fontSize': '1.4rem'}),
+                    html.Span("Wrong file format",
+                              style={'fontWeight': '700', 'color': '#EF4444', 'fontSize': '1rem'}),
+                ], style={'marginBottom': '0.75rem', 'display': 'flex', 'alignItems': 'center'}),
+                html.P(
+                    f"File '{filename}' is missing required columns: {', '.join(missing_required)}.",
+                    style={'color': 'rgba(255,255,255,0.75)', 'marginBottom': '0.5rem'}
+                ),
+                html.P(
+                    "Please upload a raw network traffic CSV file (CIC-FlowMeter format) — "
+                    "NOT an exported analysis result or blacklist file.",
+                    style={'color': 'rgba(255,255,255,0.5)', 'fontSize': '0.85rem', 'marginBottom': '0.5rem'}
+                ),
+            ]
+            if missing_rec:
+                err_lines.append(html.P(
+                    f"Missing columns (optional but recommended): {', '.join(missing_rec)}",
+                    style={'color': 'rgba(251,191,36,0.85)', 'fontSize': '0.8rem'}
+                ))
+            return (html.Div(err_lines, className="error-msg", style={'padding': '1.2rem'}),
+                    None, no_update)
+
         # Process features
         processed_df = build_features(df)
 
@@ -913,6 +1102,16 @@ def process_file(n_clicks, contents, filename, threshold):
             processed_df['is_attacker'] = predictions
             processed_df['attack_probability'] = probs
             processed_df['Status'] = processed_df['is_attacker'].map({0: 'Normal', 1: 'Malicious'})
+
+            # ── WHITELIST: override ML prediction for trusted IPs ──
+            whitelist_ips = []
+            if whitelist_text:
+                whitelist_ips = [ip.strip() for ip in whitelist_text.strip().split('\n') if ip.strip()]
+            if whitelist_ips:
+                is_wl = processed_df['Src IP'].isin(whitelist_ips)
+                processed_df.loc[is_wl, 'is_attacker'] = 0
+                processed_df.loc[is_wl, 'attack_probability'] = 0.0
+                processed_df.loc[is_wl, 'Status'] = 'Whitelisted'
         else:
             return (html.Div("❌ Model not loaded. Please check model path.", className="error-msg"),
                     None, no_update)
@@ -955,9 +1154,53 @@ def process_file(n_clicks, contents, filename, threshold):
             'Medium': '#FBBF24',  'Low': '#4ADE80', 'Secure': '#4ADE80'
         }[threat_level]
 
+        # ────── VICTIM ANALYTICS (flow-level, based on attacker Source IPs) ──────
+        victim_summary = pd.DataFrame(columns=['Dst IP', 'attacked_flows', 'unique_attackers', 'attack_type'])
+        ddos_victims = pd.DataFrame(columns=['Dst IP', 'attacked_flows', 'unique_attackers', 'attack_type'])
+        top_victims = pd.DataFrame(columns=['Dst IP', 'attacked_flows', 'unique_attackers', 'attack_type'])
+
+        if attacker_count > 0 and 'Src IP' in df.columns and 'Dst IP' in df.columns:
+            attack_src_set = set(attackers['Src IP'].astype(str).tolist())
+            attack_flows = df[['Src IP', 'Dst IP']].copy()
+            attack_flows['Src IP'] = attack_flows['Src IP'].astype(str)
+            attack_flows['Dst IP'] = attack_flows['Dst IP'].astype(str)
+            attack_flows = attack_flows[attack_flows['Src IP'].isin(attack_src_set)]
+
+            if not attack_flows.empty:
+                # Layer-2 correlation: classify by unique attacker count per victim
+                victim_summary = (
+                    attack_flows.groupby('Dst IP', as_index=False)
+                    .agg(
+                        attacked_flows=('Dst IP', 'size'),
+                        unique_attackers=('Src IP', 'nunique'),
+                    )
+                    .sort_values(['attacked_flows', 'unique_attackers'], ascending=[False, False])
+                )
+                # 1 attacker → DoS, >1 attackers → DDoS
+                victim_summary['attack_type'] = victim_summary['unique_attackers'].apply(
+                    lambda x: 'DoS' if x == 1 else 'DDoS'
+                )
+                ddos_victims = victim_summary[victim_summary['attack_type'] == 'DDoS'].copy()
+                top_victims = victim_summary.head(10).copy()
+
+        # Generate firewall scripts for BOTH platforms (user picks OS after analysis)
+        _atk_df = attackers if attacker_count > 0 else pd.DataFrame()
+        _vic_ips = top_victims['Dst IP'].astype(str).tolist() if not top_victims.empty else []
+        fw_script_linux   = build_firewall_script(_atk_df, _vic_ips, 'linux')
+        fw_script_windows = build_firewall_script(_atk_df, _vic_ips, 'windows')
+
         # ────── BUILD DETECTION RESULTS ──────
         results = html.Div([
             html.Hr(className="section-divider"),
+
+            # ── Analysis-complete banner ──
+            html.Div([
+                html.Span("✅", style={'fontSize': '1.3rem', 'marginRight': '0.6rem'}),
+                html.Span("Analysis Complete! ",
+                          style={'fontWeight': '700', 'color': '#4ADE80'}),
+                html.Span("Full results displayed below.",
+                          style={'color': 'rgba(255,255,255,0.6)'}),
+            ], className="analysis-complete-banner"),
 
             # Results Header
             html.Div([
@@ -972,11 +1215,11 @@ def process_file(n_clicks, contents, filename, threshold):
                     html.Div("TOTAL SOURCE IPS", className="r-metric-label"),
                     html.Div(f"{total_ips:,}", className="r-metric-value"),
                     html.Div("Nodes Scanned", className="r-metric-sub"),
-                ], className="r-metric-card")),
+                ], className="r-metric-card"), width=3),
 
-                # ── DDoS Attackers (with risk breakdown) ──
+                # ── Attackers (with risk breakdown) ──
                 dbc.Col(html.Div([
-                    html.Div("DDOS ATTACKERS", className="r-metric-label"),
+                    html.Div("ATTACKERS", className="r-metric-label"),
                     html.Div(f"{attacker_count:,}", className="r-metric-value",
                              style={'color': '#EF4444' if attacker_count > 0 else '#4ADE80'}),
                     html.Div(f"{attack_percent:.1f}% of total", className="r-metric-sub"),
@@ -1003,7 +1246,7 @@ def process_file(n_clicks, contents, filename, threshold):
                         ], style={'fontSize': '0.72rem', 'color': 'rgba(255,255,255,0.65)'}),
                     ], style={'marginTop': '0.4rem', 'display': 'flex', 'flexWrap': 'wrap',
                               'gap': '0.1rem'}) if attacker_count > 0 else None,
-                ], className="r-metric-card")),
+                ], className="r-metric-card"), width=3),
 
                 # ── Network Status ──
                 dbc.Col(html.Div([
@@ -1020,7 +1263,7 @@ def process_file(n_clicks, contents, filename, threshold):
                         'letterSpacing': '0.08em',
                         'background': f'{threat_color}18',
                     }),
-                ], className="r-metric-card")),
+                ], className="r-metric-card"), width=3),
 
                 # ── Avg Threat Confidence ──
                 dbc.Col(html.Div([
@@ -1032,7 +1275,7 @@ def process_file(n_clicks, contents, filename, threshold):
                         "Low certainty",
                         className="r-metric-sub"
                     ),
-                ], className="r-metric-card")),
+                ], className="r-metric-card"), width=3),
             ], className="results-metrics-row"),
 
             # Charts
@@ -1071,12 +1314,24 @@ def process_file(n_clicks, contents, filename, threshold):
                 "✅ No threats detected", className="no-threats-msg"
             ),
 
+            # Top victim chart
+            html.Div([
+                html.H3("🎯 Top 10 Most Targeted Servers (Top Victims)", className="section-heading"),
+                dcc.Graph(figure=create_top_victims_chart(top_victims)),
+            ], className="charts-section") if not top_victims.empty else None,
+
             # Data Tables
             dbc.Tabs([
                 dbc.Tab(
-                    build_blacklist_tab(attackers, attacker_count, threshold),
+                    build_blacklist_tab(attackers, attacker_count, threshold,
+                                       fw_script_linux, fw_script_windows),
                     label="🚨 BLACKLIST",
                     tab_id="tab-bl",
+                ),
+                dbc.Tab(
+                    build_victims_tab(ddos_victims, victim_summary),
+                    label="🎯 VICTIMS",
+                    tab_id="tab-victims",
                 ),
                 dbc.Tab(
                     build_full_tab(processed_df),
@@ -1372,11 +1627,231 @@ def create_threats_chart(df):
     )
     return fig
 
+
+def create_top_victims_chart(top_victims_df):
+    """Bar chart for top targeted destination servers (victims)."""
+    if top_victims_df is None or top_victims_df.empty:
+        fig = go.Figure()
+        fig.update_layout(
+            **CHART_LAYOUT,
+            title="Top Victims (No data)",
+            annotations=[dict(
+                text="No victim targets found",
+                showarrow=False,
+                font=dict(color='rgba(255,255,255,0.35)', size=14),
+                xref="paper", yref="paper", x=0.5, y=0.5
+            )]
+        )
+        return fig
+
+    color_map = {'DDoS': '#DC2626', 'DoS': '#F59E0B', 'Unknown': '#64748B'}
+    fig = px.bar(
+        top_victims_df,
+        x='Dst IP',
+        y='attacked_flows',
+        color='attack_type',
+        color_discrete_map=color_map,
+        title="Number of attack flows per destination server",
+        text='attacked_flows',
+        labels={'Dst IP': 'Destination IP', 'attacked_flows': 'Attack Flows'}
+    )
+    fig.update_traces(textposition='outside')
+    fig.update_layout(
+        **CHART_LAYOUT,
+        xaxis=dict(showgrid=False, tickangle=-30),
+        yaxis=dict(showgrid=True, gridcolor='rgba(255,255,255,0.06)')
+    )
+    return fig
+
+
+def build_top_victims_table(top_victims_df):
+    """Compact table for top 10 victims with attack intensity fields."""
+    if top_victims_df is None or top_victims_df.empty:
+        return html.Div("No victim targets to display.", className="tab-safe")
+
+    show = top_victims_df.copy().reset_index(drop=True)
+    show.insert(0, 'Rank', show.index + 1)
+    show.rename(columns={
+        'Dst IP': 'Victim Server IP',
+        'attacked_flows': 'Attack Flows',
+        'unique_attackers': 'Unique Attackers',
+        'attack_type': 'Attack Type'
+    }, inplace=True)
+
+    return html.Div(
+        dbc.Table.from_dataframe(show, striped=True, bordered=True, hover=True, size='sm', className='custom-table'),
+        style={'overflowX': 'auto', 'maxWidth': '100%'}
+    )
+
+
+def build_firewall_script(attackers_df, victim_ips, os_choice='linux'):
+    """Generate platform-specific firewall mitigation script.
+
+    Linux  → iptables + ipset (hybrid: block high-risk, rate-limit suspects)
+    Windows → PowerShell NetFirewallRule
+    """
+    if attackers_df is None or attackers_df.empty:
+        return '# No attackers detected — nothing to block.\n'
+
+    if os_choice == 'windows':
+        return _fw_windows(attackers_df, victim_ips)
+    return _fw_linux(attackers_df, victim_ips)
+
+
+def _fw_linux(attackers_df, victim_ips):
+    lines = [
+        '#!/bin/bash',
+        '# Auto-generated Hybrid Defense Script — ML-DDoS Detector',
+        '# Review before applying in production',
+        '',
+        'set -e',
+        '',
+        "echo 'Initialising multi-layer defence (iptables + ipset)...'",
+        '',
+        '# Install ipset if missing',
+        'if ! command -v ipset &>/dev/null; then sudo apt-get install -y ipset || sudo dnf install -y ipset; fi',
+        '',
+        'ipset destroy ddos_blacklist 2>/dev/null || true',
+        'ipset create ddos_blacklist hash:ip hashsize 4096 maxelem 200000',
+        '',
+        '# --- Rules classified by ML risk score ---',
+    ]
+
+    for _, row in attackers_df.iterrows():
+        ip = str(row['Src IP'])
+        prob = float(row.get('attack_probability', 1.0))
+        if prob > 0.80:
+            lines.append(f"ipset add ddos_blacklist {ip}  # Risk: {prob:.2%}")
+        else:
+            lines.append(f"iptables -A INPUT -s {ip} -m limit --limit 20/sec --limit-burst 50 -j ACCEPT  # Rate-limit: {prob:.2%}")
+            lines.append(f"iptables -A INPUT -s {ip} -j DROP  # Drop excess")
+
+    lines += [
+        '',
+        '# --- Activate ipset permanent block ---',
+        'iptables -D INPUT -m set --match-set ddos_blacklist src -j DROP 2>/dev/null || true',
+        'iptables -I INPUT 1 -m set --match-set ddos_blacklist src -j DROP',
+    ]
+
+    lines += ['', "echo 'Mitigation rules applied successfully.'", '']
+    return '\n'.join(lines)
+
+
+def _fw_windows(attackers_df, victim_ips):
+    lines = [
+        '# Auto-generated Windows Firewall Rules — ML-DDoS Detector',
+        '# Run in PowerShell as Administrator',
+        '',
+        "Write-Host 'Initialising Windows Server defence...' -ForegroundColor Cyan",
+        '',
+        "Remove-NetFirewallRule -DisplayName 'DDoS_BlockList*' -ErrorAction SilentlyContinue",
+        '',
+    ]
+
+    high_risk = attackers_df[attackers_df['attack_probability'] > 0.80]['Src IP'].astype(str).tolist()
+    suspects  = attackers_df[attackers_df['attack_probability'] <= 0.80]['Src IP'].astype(str).tolist()
+
+    if high_risk:
+        ip_str = ', '.join([f"'{ip}'" for ip in high_risk])
+        lines += [
+            '# 1. High-Risk IPs (>80%) — permanent block',
+            f'$HighRiskIPs = @({ip_str})',
+            "New-NetFirewallRule -DisplayName 'DDoS_BlockList_High' -Direction Inbound -Action Block -RemoteAddress $HighRiskIPs",
+            '',
+        ]
+
+    if suspects:
+        ip_str = ', '.join([f"'{ip}'" for ip in suspects])
+        lines += [
+            '# 2. Suspect IPs (<=80%) — temporary block (review recommended)',
+            '# NOTE: Windows Firewall does not support native rate-limiting.',
+            f'$SuspiciousIPs = @({ip_str})',
+            "New-NetFirewallRule -DisplayName 'DDoS_BlockList_Medium' -Direction Inbound -Action Block -RemoteAddress $SuspiciousIPs",
+            '',
+        ]
+
+    lines += ["Write-Host 'Firewall rules applied.' -ForegroundColor Green", '']
+    return '\n'.join(lines)
+
+
+def build_victims_tab(ddos_victims, all_victims):
+    """Victim-focused tab: DDoS target list and aggregate targets."""
+    ddos_view = ddos_victims.copy() if ddos_victims is not None else pd.DataFrame()
+    all_view = all_victims.copy() if all_victims is not None else pd.DataFrame()
+
+    if not ddos_view.empty:
+        ddos_view = ddos_view.reset_index(drop=True)
+        ddos_view.insert(0, 'No.', ddos_view.index + 1)
+    if not all_view.empty:
+        all_view = all_view.reset_index(drop=True)
+        all_view.insert(0, 'No.', all_view.index + 1)
+
+    ddos_title = "🚨 DDOS ATTACK TARGET LIST (DISTRIBUTED)"
+    all_title = "🎯 ALL ATTACK TARGETS SUMMARY"
+
+    # Rename columns for display
+    col_map = {'unique_attackers': 'Number of Attackers', 'attack_type': 'Attack Type'}
+    ddos_cols = ['No.', 'Dst IP', 'Number of Attackers', 'Attack Type']
+    all_cols  = ['No.', 'Dst IP', 'Number of Attackers', 'Attack Type']
+
+    ddos_disp = ddos_view.rename(columns=col_map) if not ddos_view.empty else pd.DataFrame(columns=ddos_cols)
+    all_disp  = all_view.rename(columns=col_map)  if not all_view.empty  else pd.DataFrame(columns=all_cols)
+
+    # Helper: build table rows with color-coded Attack Type column
+    _type_colors = {'DDoS': '#EF4444', 'DoS': '#FBBF24', 'Unknown': '#64748B'}
+    def _make_rows(frame, cols):
+        rows = []
+        for _, r in frame.iterrows():
+            cells = []
+            for c in cols:
+                val = r.get(c, '')
+                if c == 'Attack Type':
+                    color = _type_colors.get(str(val), '#64748B')
+                    cells.append(html.Td(
+                        html.Span(str(val), style={
+                            'color': color, 'fontWeight': '700',
+                            'padding': '2px 10px', 'borderRadius': '6px',
+                            'background': f'{color}18', 'border': f'1px solid {color}44',
+                            'fontSize': '0.82rem',
+                        })
+                    ))
+                else:
+                    cells.append(html.Td(str(val)))
+            rows.append(html.Tr(cells))
+        return rows
+
+    def _build_colored_table(frame, cols):
+        header = html.Thead(html.Tr([html.Th(c) for c in cols]))
+        body = html.Tbody(_make_rows(frame, cols) if not frame.empty else [])
+        return dbc.Table([header, body], striped=True, bordered=True,
+                         hover=True, size='sm', className='custom-table')
+
+    return html.Div([
+        html.Div([
+            html.H4(ddos_title, style={'color': '#FCA5A5', 'fontSize': '0.95rem', 'marginBottom': '0.65rem'}),
+            html.P("Destination servers receiving traffic labelled DDoS from detected sources.", className="tab-warning"),
+            html.Div(
+                _build_colored_table(ddos_disp, ddos_cols),
+                style={'overflowX': 'auto', 'maxWidth': '100%'}
+            ),
+        ], style={'marginBottom': '1.5rem'}),
+
+        html.Div([
+            html.H4(all_title, style={'color': '#FDE68A', 'fontSize': '0.95rem', 'marginBottom': '0.65rem'}),
+            html.P("All targeted destination servers (including DDoS, DoS, and Unknown).", className="tab-warning"),
+            html.Div(
+                _build_colored_table(all_disp, all_cols),
+                style={'overflowX': 'auto', 'maxWidth': '100%'}
+            ),
+        ], style={'marginBottom': '1.5rem'}),
+    ], className="tab-content-inner")
+
 # =============================================================================
 # 8. TABLE TAB FUNCTIONS
 # =============================================================================
-def build_blacklist_tab(attackers, count, threshold):
-    """Build the attacker blacklist tab"""
+def build_blacklist_tab(attackers, count, threshold,
+                       fw_linux='', fw_windows=''):
+    """Build the attacker blacklist tab with embedded Mitigation Tools."""
     if count > 0:
         # Dynamically pick available columns for blacklist table
         base_cols = ['Src IP', 'attack_probability']
@@ -1400,84 +1875,161 @@ def build_blacklist_tab(attackers, count, threshold):
         if 'active_duration_sec' in bl.columns:
             bl['active_duration_sec'] = bl['active_duration_sec'].apply(lambda x: f"{x:.1f}s")
 
+        # ── Mitigation Tools section (below attacker table) ──
+        linux_href = "data:text/plain;charset=utf-8," + quote(fw_linux) if fw_linux else ''
+        win_href   = "data:text/plain;charset=utf-8," + quote(fw_windows) if fw_windows else ''
+
+        mitigation_section = html.Div([
+            html.Hr(style={'borderColor': 'rgba(255,255,255,0.08)', 'margin': '1.5rem 0 1rem'}),
+            html.Div([
+                html.Span("🛠️", style={'fontSize': '1.2rem', 'marginRight': '0.55rem'}),
+                html.Span("INCIDENT RESPONSE TOOLS (MITIGATION TOOLS)",
+                          style={'fontWeight': '700', 'fontSize': '0.95rem',
+                                 'letterSpacing': '0.04em'}),
+            ], style={'display': 'flex', 'alignItems': 'center', 'marginBottom': '0.65rem'}),
+
+            html.P(
+                "What OS is the victim server running?",
+                style={'color': 'rgba(255,255,255,0.5)', 'fontSize': '0.82rem',
+                       'marginBottom': '0.6rem'}
+            ),
+
+            dbc.RadioItems(
+                id='os-choice',
+                options=[
+                    {'label': ' Linux (iptables / ipset)', 'value': 'linux'},
+                    {'label': ' Windows Server (PowerShell)', 'value': 'windows'},
+                ],
+                value='linux',
+                inline=True,
+                className='os-radio-group',
+            ),
+
+            # Two download rows — toggled by clientside callback
+            html.Div([
+                html.A("📥 Download Blacklist (.csv)",
+                       download="ddos_blacklist.csv",
+                       href="data:text/csv;charset=utf-8," + bl.to_csv(index=False),
+                       className="download-btn"),
+                html.A("🛡️ Download Firewall Script (.sh)",
+                       download="ddos_firewall_mitigation.sh",
+                       href=linux_href,
+                       className="download-btn"),
+            ], id='fw-linux-row',
+               style={'display': 'flex', 'flexWrap': 'wrap', 'gap': '0.65rem',
+                      'marginTop': '0.85rem'}),
+
+            html.Div([
+                html.A("📥 Download Blacklist (.csv)",
+                       download="ddos_blacklist.csv",
+                       href="data:text/csv;charset=utf-8," + bl.to_csv(index=False),
+                       className="download-btn"),
+                html.A("🛡️ Download Firewall Script (.ps1)",
+                       download="ddos_firewall_mitigation.ps1",
+                       href=win_href,
+                       className="download-btn"),
+            ], id='fw-windows-row',
+               style={'display': 'none', 'flexWrap': 'wrap', 'gap': '0.65rem',
+                      'marginTop': '0.85rem'}),
+        ], className='mitigation-tools-section')
+
         return html.Div([
             html.P(f"⚠️ {count} IPs detected with attack behavior (threshold {threshold})", className="tab-warning"),
             dbc.Table.from_dataframe(bl, striped=True, bordered=True, hover=True, size='sm', className='custom-table'),
-            html.A("📥 Download Blacklist CSV", download="blacklist.csv",
-                   href="data:text/csv;charset=utf-8," + bl.to_csv(index=False),
-                   className="download-btn"),
+            mitigation_section,
         ], className="tab-content-inner")
     return html.Div("✅ No threats detected. System is secure.", className="tab-safe")
 
 def build_full_tab(df):
-    """Build full dataset report tab — fixed-column layout with overflow scroll."""
-    # Select ONLY the columns we want to show (avoids wide internal cols that break layout)
-    SHOW_COLS  = ['Src IP', 'Status', 'Risk Level', 'attack_probability']
-    EXTRA_COLS = [
-        'pkt_rate', 'byte_rate', 'syn_ack_ratio',
-        'mean_iat', 'size_consistency',
-        'dst_ip_ratio', 'dst_port_ratio', 'active_duration_sec',
-    ]
-    cols = SHOW_COLS + [c for c in EXTRA_COLS if c in df.columns]
-    display = df[cols].copy()
-
-    display['attack_probability'] = display['attack_probability'].apply(lambda x: f"{x:.2%}")
-    for c in ['pkt_rate', 'byte_rate', 'syn_ack_ratio']:
-        if c in display.columns:
-            display[c] = display[c].apply(lambda x: f"{x:.2f}")
-    for c in ['mean_iat', 'size_consistency', 'dst_ip_ratio', 'dst_port_ratio']:
-        if c in display.columns:
-            display[c] = display[c].apply(lambda x: f"{x:.4f}")
-    if 'active_duration_sec' in display.columns:
-        display['active_duration_sec'] = display['active_duration_sec'].apply(lambda x: f"{x:.1f}s")
-
-    # Rename columns for display
-    rename_map = {
-        'attack_probability': 'Attack Prob',
-        'pkt_rate':           'Pkt/s',
-        'byte_rate':          'Byte/s',
-        'syn_ack_ratio':      'SYN/ACK',
-        'mean_iat':           'Mean IAT',
-        'size_consistency':   'Size Consist.',
-        'dst_ip_ratio':       'Dst IP Ratio',
-        'dst_port_ratio':     'Dst Port Ratio',
-        'active_duration_sec':'Active Dur',
-    }
-    display.rename(columns=rename_map, inplace=True)
-
-    # Wrap table in overflow container — THIS is the root fix for the zoom bug
-    table_div = html.Div(
-        dbc.Table.from_dataframe(
-            display.head(100),
-            striped=True, bordered=True, hover=True,
-            size='sm', className='custom-table',
-            style={'tableLayout': 'auto', 'width': 'max-content', 'minWidth': '100%'},
-        ),
-        style={
-            'overflowX': 'auto',
-            'overflowY': 'hidden',
-            'width':     '100%',
-            'maxWidth':  '100%',
-            '-webkit-overflow-scrolling': 'touch',
-        }
-    )
+    """Build full dataset report tab — single table showing ALL columns from processed_df."""
+    full_display = df.copy()
 
     return html.Div([
         html.Div([
-            html.H4("Complete Traffic Analysis",
+            html.H4("Full Network Data",
                     style={'color': '#fff', 'marginBottom': '0', 'fontSize': '1rem'}),
-            html.Span(f"{min(len(df), 100):,} of {len(df):,} records",
+            html.Span(f"{len(df):,} records",
                       style={'color': 'rgba(255,255,255,0.4)', 'fontSize': '0.78rem'}),
         ], style={'display': 'flex', 'justifyContent': 'space-between',
                   'alignItems': 'center', 'marginBottom': '0.85rem'}),
-        table_div,
-        html.A("📥 Download Full Report (CSV)", download="full_report.csv",
-               href="data:text/csv;charset=utf-8," + df[cols].to_csv(index=False),
-               className="download-btn"),
+        html.Div([
+            html.A("📥 Download Full Report (CSV)", download="full_network_traffic_analysis.csv",
+                   href="data:text/csv;charset=utf-8," + quote(full_display.to_csv(index=False)),
+                   className="download-btn"),
+        ], style={'display': 'flex', 'flexWrap': 'wrap', 'gap': '0.65rem',
+                  'marginBottom': '0.85rem'}),
+        html.Div(
+            dbc.Table.from_dataframe(
+                full_display,
+                striped=True, bordered=True, hover=True,
+                size='sm', className='custom-table',
+                style={'tableLayout': 'auto', 'width': 'max-content', 'minWidth': '100%'},
+            ),
+            style={
+                'overflowX': 'auto',
+                'overflowY': 'hidden',
+                'width': '100%',
+                'maxWidth': '100%',
+                '-webkit-overflow-scrolling': 'touch',
+            }
+        ),
     ], className="tab-content-inner")
+
+# ─── Clientside callback: show centred toast then scroll to results ───────
+# When results-section gets new children (analysis finished), pop up a
+# centred overlay toast for ~3 s, then smoothly scroll to results.
+app.clientside_callback(
+    """
+    function(children) {
+        if (!children || children === null) return null;
+
+        var toast = document.getElementById('analysis-toast');
+        if (toast) {
+            /* reset any previous animation state */
+            toast.classList.remove('toast-hide');
+            toast.classList.add('toast-show');
+
+            /* after 2.8 s: start fade-out AND scroll simultaneously */
+            setTimeout(function() {
+                toast.classList.remove('toast-show');
+                toast.classList.add('toast-hide');
+
+                var el = document.getElementById('results-section');
+                if (el) {
+                    el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                }
+
+                /* fully hide once fade-out animation has finished (0.45 s) */
+                setTimeout(function() {
+                    toast.classList.remove('toast-hide');
+                }, 500);
+            }, 2800);
+        }
+        return null;
+    }
+    """,
+    Output('_toast-trigger', 'data'),
+    Input('results-section', 'children'),
+    prevent_initial_call=True,
+)
+
+# ─── Clientside callback: toggle Linux / Windows download rows ───
+app.clientside_callback(
+    """
+    function(os) {
+        if (os === 'windows') {
+            return [{display: 'none'}, {display: 'flex', flexWrap: 'wrap', gap: '0.65rem', marginTop: '0.85rem'}];
+        }
+        return [{display: 'flex', flexWrap: 'wrap', gap: '0.65rem', marginTop: '0.85rem'}, {display: 'none'}];
+    }
+    """,
+    [Output('fw-linux-row', 'style'),
+     Output('fw-windows-row', 'style')],
+    Input('os-choice', 'value'),
+)
 
 # =============================================================================
 # 9. RUN
 # =============================================================================
 if __name__ == '__main__':
-    app.run(debug=True, port=8051)
+    app.run(debug=True, port=8051, use_reloader=False)
