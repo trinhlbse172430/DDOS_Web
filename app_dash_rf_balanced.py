@@ -23,7 +23,7 @@ app = dash.Dash(
     suppress_callback_exceptions=True
 )
 app.title = "ML-DDoS Detector"
-
+server = app.server
 # =============================================================================
 # 2. LOAD MODEL 
 # =============================================================================
