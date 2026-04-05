@@ -11,18 +11,17 @@ import base64
 import io
 import os
 import ipaddress
-from urllib.parse import quote
 
 # =============================================================================
 # 1. APP INITIALIZATION
 # =============================================================================
 _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
 app = dash.Dash(
     __name__,
     external_stylesheets=[dbc.themes.BOOTSTRAP],
     suppress_callback_exceptions=True
 )
-server = app.server
 app.title = "ML-DDoS Detector"
 
 # =============================================================================
@@ -861,6 +860,12 @@ app.layout = html.Div([
     dcc.Store(id='scan-metrics', data=None),
     dcc.Store(id='_do-analysis', data=0),
 
+    # Stores to hold download payloads (set once during analysis)
+    dcc.Store(id='_bl-csv-data',    data=None),
+    dcc.Store(id='_fw-linux-data',  data=None),
+    dcc.Store(id='_fw-win-data',    data=None),
+    dcc.Store(id='_full-csv-data',  data=None),
+
     # ─── WHITELIST CONFIRMATION MODAL ────────────────────────────
     dbc.Modal([
         dbc.ModalHeader(
@@ -1031,7 +1036,11 @@ def handle_scan_flow(scan_clicks, confirm_clicks, cancel_clicks,
 @app.callback(
     [Output('results-section', 'children'),
      Output('stored-data', 'data'),
-     Output('scan-metrics', 'data')],
+     Output('scan-metrics', 'data'),
+     Output('_bl-csv-data',   'data'),
+     Output('_fw-linux-data', 'data'),
+     Output('_fw-win-data',   'data'),
+     Output('_full-csv-data', 'data')],
     [Input('_do-analysis', 'data')],
     [State('upload-data', 'contents'),
      State('upload-data', 'filename'),
@@ -1041,7 +1050,7 @@ def handle_scan_flow(scan_clicks, confirm_clicks, cancel_clicks,
 )
 def process_file(analysis_trigger, contents, filename, threshold, whitelist_text):
     if not analysis_trigger or contents is None:
-        return (no_update, no_update, no_update)
+        return (no_update, no_update, no_update, no_update, no_update, no_update, no_update)
 
     try:
         # Parse file
@@ -1054,7 +1063,7 @@ def process_file(analysis_trigger, contents, filename, threshold, whitelist_text
             df = pd.read_parquet(io.BytesIO(decoded))
         else:
             return (html.Div("❌ Unsupported file format", className="error-msg"),
-                    None, no_update)
+                    None, no_update, no_update, no_update, no_update, no_update)
 
         raw_count = len(df)
 
@@ -1088,7 +1097,7 @@ def process_file(analysis_trigger, contents, filename, threshold, whitelist_text
                     style={'color': 'rgba(251,191,36,0.85)', 'fontSize': '0.8rem'}
                 ))
             return (html.Div(err_lines, className="error-msg", style={'padding': '1.2rem'}),
-                    None, no_update)
+                    None, no_update, no_update, no_update, no_update, no_update)
 
         # Process features
         processed_df = build_features(df)
@@ -1114,7 +1123,7 @@ def process_file(analysis_trigger, contents, filename, threshold, whitelist_text
                 processed_df.loc[is_wl, 'Status'] = 'Whitelisted'
         else:
             return (html.Div("❌ Model not loaded. Please check model path.", className="error-msg"),
-                    None, no_update)
+                    None, no_update, no_update, no_update, no_update, no_update)
 
         # ────── CALCULATE METRICS ──────
         total_ips = len(processed_df)
@@ -1350,12 +1359,30 @@ def process_file(analysis_trigger, contents, filename, threshold, whitelist_text
             'avg_conf': avg_conf,
         }
 
+        # ── Prepare download payloads ──
+        # Blacklist CSV (same columns shown in the blacklist tab table)
+        bl_csv_str = None
+        if attacker_count > 0:
+            base_cols = ['Src IP', 'attack_probability']
+            optional_cols = [
+                'pkt_rate', 'byte_rate', 'syn_ack_ratio',
+                'mean_iat', 'size_consistency', 'active_duration_sec',
+            ]
+            _bl_cols = base_cols + [c for c in optional_cols if c in attackers.columns]
+            bl_csv_str = attackers[_bl_cols].sort_values(
+                'attack_probability', ascending=False
+            ).to_csv(index=False)
+
         return (results,
-                processed_df.to_dict('records'), scan_data)
+                processed_df.to_dict('records'), scan_data,
+                bl_csv_str,
+                fw_script_linux or None,
+                fw_script_windows or None,
+                processed_df.to_csv(index=False))
 
     except Exception as e:
         return (html.Div(f"❌ Error: {str(e)}", className="error-msg"),
-                None, no_update)
+                None, no_update, no_update, no_update, no_update, no_update)
 
 # =============================================================================
 # 7. CHART HELPER FUNCTIONS (callback charts)
@@ -1876,8 +1903,6 @@ def build_blacklist_tab(attackers, count, threshold,
             bl['active_duration_sec'] = bl['active_duration_sec'].apply(lambda x: f"{x:.1f}s")
 
         # ── Mitigation Tools section (below attacker table) ──
-        linux_href = "data:text/plain;charset=utf-8," + quote(fw_linux) if fw_linux else ''
-        win_href   = "data:text/plain;charset=utf-8," + quote(fw_windows) if fw_windows else ''
 
         mitigation_section = html.Div([
             html.Hr(style={'borderColor': 'rgba(255,255,255,0.08)', 'margin': '1.5rem 0 1rem'}),
@@ -1907,27 +1932,23 @@ def build_blacklist_tab(attackers, count, threshold,
 
             # Two download rows — toggled by clientside callback
             html.Div([
-                html.A("📥 Download Blacklist (.csv)",
-                       download="ddos_blacklist.csv",
-                       href="data:text/csv;charset=utf-8," + bl.to_csv(index=False),
-                       className="download-btn"),
-                html.A("🛡️ Download Firewall Script (.sh)",
-                       download="ddos_firewall_mitigation.sh",
-                       href=linux_href,
-                       className="download-btn"),
+                html.Button("📥 Download Blacklist (.csv)",
+                            id='btn-dl-bl-csv-linux', n_clicks=0,
+                            className="download-btn"),
+                html.Button("🛡️ Download Firewall Script (.sh)",
+                            id='btn-dl-fw-linux', n_clicks=0,
+                            className="download-btn"),
             ], id='fw-linux-row',
                style={'display': 'flex', 'flexWrap': 'wrap', 'gap': '0.65rem',
                       'marginTop': '0.85rem'}),
 
             html.Div([
-                html.A("📥 Download Blacklist (.csv)",
-                       download="ddos_blacklist.csv",
-                       href="data:text/csv;charset=utf-8," + bl.to_csv(index=False),
-                       className="download-btn"),
-                html.A("🛡️ Download Firewall Script (.ps1)",
-                       download="ddos_firewall_mitigation.ps1",
-                       href=win_href,
-                       className="download-btn"),
+                html.Button("📥 Download Blacklist (.csv)",
+                            id='btn-dl-bl-csv-win', n_clicks=0,
+                            className="download-btn"),
+                html.Button("🛡️ Download Firewall Script (.ps1)",
+                            id='btn-dl-fw-win', n_clicks=0,
+                            className="download-btn"),
             ], id='fw-windows-row',
                style={'display': 'none', 'flexWrap': 'wrap', 'gap': '0.65rem',
                       'marginTop': '0.85rem'}),
@@ -1953,9 +1974,9 @@ def build_full_tab(df):
         ], style={'display': 'flex', 'justifyContent': 'space-between',
                   'alignItems': 'center', 'marginBottom': '0.85rem'}),
         html.Div([
-            html.A("📥 Download Full Report (CSV)", download="full_network_traffic_analysis.csv",
-                   href="data:text/csv;charset=utf-8," + quote(full_display.to_csv(index=False)),
-                   className="download-btn"),
+            html.Button("📥 Download Full Report (CSV)",
+                        id='btn-dl-full-csv', n_clicks=0,
+                        className="download-btn"),
         ], style={'display': 'flex', 'flexWrap': 'wrap', 'gap': '0.65rem',
                   'marginBottom': '0.85rem'}),
         html.Div(
@@ -2026,6 +2047,65 @@ app.clientside_callback(
     [Output('fw-linux-row', 'style'),
      Output('fw-windows-row', 'style')],
     Input('os-choice', 'value'),
+)
+
+# ─── Clientside helper: Blob-based file download (bypasses React data: URI block) ───
+_BLOB_DOWNLOAD_JS = """
+    function(n, content) {
+        if (!n || !content) return window.dash_clientside.no_update;
+        var blob = new Blob([content], {type: '%MIME%'});
+        var url  = URL.createObjectURL(blob);
+        var a    = document.createElement('a');
+        a.href = url;  a.download = '%FNAME%';
+        document.body.appendChild(a);  a.click();
+        setTimeout(function() { document.body.removeChild(a); URL.revokeObjectURL(url); }, 200);
+        return window.dash_clientside.no_update;
+    }
+"""
+
+# Blacklist CSV  —  Linux row button
+app.clientside_callback(
+    _BLOB_DOWNLOAD_JS.replace('%MIME%', 'text/csv').replace('%FNAME%', 'ddos_blacklist.csv'),
+    Output('btn-dl-bl-csv-linux', 'title'),
+    Input('btn-dl-bl-csv-linux', 'n_clicks'),
+    State('_bl-csv-data', 'data'),
+    prevent_initial_call=True,
+)
+
+# Blacklist CSV  —  Windows row button
+app.clientside_callback(
+    _BLOB_DOWNLOAD_JS.replace('%MIME%', 'text/csv').replace('%FNAME%', 'ddos_blacklist.csv'),
+    Output('btn-dl-bl-csv-win', 'title'),
+    Input('btn-dl-bl-csv-win', 'n_clicks'),
+    State('_bl-csv-data', 'data'),
+    prevent_initial_call=True,
+)
+
+# Firewall script  —  Linux (.sh)
+app.clientside_callback(
+    _BLOB_DOWNLOAD_JS.replace('%MIME%', 'text/plain').replace('%FNAME%', 'ddos_firewall_mitigation.sh'),
+    Output('btn-dl-fw-linux', 'title'),
+    Input('btn-dl-fw-linux', 'n_clicks'),
+    State('_fw-linux-data', 'data'),
+    prevent_initial_call=True,
+)
+
+# Firewall script  —  Windows (.ps1)
+app.clientside_callback(
+    _BLOB_DOWNLOAD_JS.replace('%MIME%', 'text/plain').replace('%FNAME%', 'ddos_firewall_mitigation.ps1'),
+    Output('btn-dl-fw-win', 'title'),
+    Input('btn-dl-fw-win', 'n_clicks'),
+    State('_fw-win-data', 'data'),
+    prevent_initial_call=True,
+)
+
+# Full report CSV
+app.clientside_callback(
+    _BLOB_DOWNLOAD_JS.replace('%MIME%', 'text/csv').replace('%FNAME%', 'full_network_traffic_analysis.csv'),
+    Output('btn-dl-full-csv', 'title'),
+    Input('btn-dl-full-csv', 'n_clicks'),
+    State('_full-csv-data', 'data'),
+    prevent_initial_call=True,
 )
 
 # =============================================================================
