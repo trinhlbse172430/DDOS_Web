@@ -10,7 +10,6 @@ from datetime import datetime
 import base64
 import io
 import os
-import ipaddress
 
 # =============================================================================
 # 1. APP INITIALIZATION
@@ -24,6 +23,7 @@ app = dash.Dash(
 )
 app.title = "ML-DDoS Detector"
 server = app.server
+
 # =============================================================================
 # 2. LOAD MODEL 
 # =============================================================================
@@ -1058,7 +1058,10 @@ def process_file(analysis_trigger, contents, filename, threshold, whitelist_text
         decoded = base64.b64decode(content_string)
 
         if filename.endswith('.csv'):
-            df = pd.read_csv(io.StringIO(decoded.decode('utf-8')))
+            try:
+                df = pd.read_csv(io.StringIO(decoded.decode('utf-8')))
+            except UnicodeDecodeError:
+                df = pd.read_csv(io.StringIO(decoded.decode('latin-1')))
         elif filename.endswith('.parquet'):
             df = pd.read_parquet(io.BytesIO(decoded))
         else:
@@ -1137,7 +1140,8 @@ def process_file(analysis_trigger, contents, filename, threshold, whitelist_text
         processed_df['Risk Level'] = pd.cut(
             processed_df['attack_probability'],
             bins=[0, 0.25, 0.5, 0.75, 1.0],
-            labels=['Low', 'Medium', 'High', 'Critical']
+            labels=['Low', 'Medium', 'High', 'Critical'],
+            include_lowest=True,
         )
 
         # Re-slice attackers AFTER Risk Level is assigned so charts see the column
@@ -2112,4 +2116,4 @@ app.clientside_callback(
 # 9. RUN
 # =============================================================================
 if __name__ == '__main__':
-    app.run(debug=True, port=8051, use_reloader=False)
+    app.run(debug=False, port=8051, use_reloader=False)
