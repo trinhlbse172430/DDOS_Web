@@ -458,6 +458,58 @@ app.layout = html.Div([
                 ),
             ], className="dash-panel"),
 
+            # ── Processing Progress Overlay ──
+            html.Div([
+                html.Div([
+                    # Animated spinner
+                    html.Div([
+                        html.Div(className="progress-spinner"),
+                    ], className="progress-spinner-wrap"),
+
+                    # Title
+                    html.H3("Analyzing Network Traffic…",
+                            id="progress-title",
+                            className="progress-title"),
+
+                    # Subtitle / current step
+                    html.P("Initializing analysis pipeline",
+                           id="progress-step-text",
+                           className="progress-step-text"),
+
+                    # Progress bar
+                    html.Div([
+                        html.Div(id="progress-bar-fill",
+                                 className="progress-bar-fill",
+                                 style={'width': '0%'}),
+                    ], className="progress-bar-track"),
+
+                    # Percentage
+                    html.Span("0%", id="progress-pct",
+                              className="progress-pct"),
+
+                    # Step indicators
+                    html.Div([
+                        html.Div([
+                            html.Span("📂", className="pstep-icon"),
+                            html.Span("Parsing file", className="pstep-label"),
+                        ], id="pstep-1", className="pstep"),
+                        html.Div([
+                            html.Span("⚙️", className="pstep-icon"),
+                            html.Span("Feature engineering", className="pstep-label"),
+                        ], id="pstep-2", className="pstep"),
+                        html.Div([
+                            html.Span("🤖", className="pstep-icon"),
+                            html.Span("ML prediction", className="pstep-label"),
+                        ], id="pstep-3", className="pstep"),
+                        html.Div([
+                            html.Span("📊", className="pstep-icon"),
+                            html.Span("Generating report", className="pstep-label"),
+                        ], id="pstep-4", className="pstep"),
+                    ], className="progress-steps"),
+                ], className="progress-card"),
+            ], id="processing-overlay", className="processing-overlay",
+               style={'display': 'none'}),
+
             # ── Results Section (appears below after analysis) ──
             html.Div(id='results-section', children=[]),
 
@@ -2003,10 +2055,22 @@ def build_full_tab(df):
 # ─── Clientside callback: show centred toast then scroll to results ───────
 # When results-section gets new children (analysis finished), pop up a
 # centred overlay toast for ~3 s, then smoothly scroll to results.
+# Also hides the processing progress overlay.
 app.clientside_callback(
     """
     function(children) {
         if (!children || children === null) return null;
+
+        /* ── Hide the processing overlay ── */
+        var overlay = document.getElementById('processing-overlay');
+        if (overlay) {
+            overlay.style.display = 'none';
+        }
+        /* Stop any running progress animation */
+        if (window._progressInterval) {
+            clearInterval(window._progressInterval);
+            window._progressInterval = null;
+        }
 
         var toast = document.getElementById('analysis-toast');
         if (toast) {
@@ -2035,6 +2099,109 @@ app.clientside_callback(
     """,
     Output('_toast-trigger', 'data'),
     Input('results-section', 'children'),
+    prevent_initial_call=True,
+)
+
+# ─── Clientside callback: show processing progress overlay ───────
+# Fires instantly when _do-analysis increments (before server callback runs).
+# Animates a timed progress bar with step indicators.
+app.clientside_callback(
+    """
+    function(n) {
+        if (!n) return window.dash_clientside.no_update;
+
+        var overlay = document.getElementById('processing-overlay');
+        if (!overlay) return window.dash_clientside.no_update;
+
+        /* Show overlay */
+        overlay.style.display = 'flex';
+
+        /* Reset state */
+        var fill  = document.getElementById('progress-bar-fill');
+        var pct   = document.getElementById('progress-pct');
+        var title = document.getElementById('progress-title');
+        var step  = document.getElementById('progress-step-text');
+        var steps = [
+            document.getElementById('pstep-1'),
+            document.getElementById('pstep-2'),
+            document.getElementById('pstep-3'),
+            document.getElementById('pstep-4')
+        ];
+
+        if (fill) fill.style.width = '0%';
+        if (pct) pct.textContent = '0%';
+        steps.forEach(function(s) {
+            if (s) { s.className = 'pstep'; }
+        });
+
+        /*
+         * Timed progress simulation.
+         * Steps map to real processing stages:
+         *   0-10%   Parsing file            (~1-2s)
+         *  10-45%   Feature engineering      (~8-15s, heaviest)
+         *  45-70%   ML prediction            (~3-5s)
+         *  70-92%   Generating report        (~3-5s)
+         *  92-96%   Stays here until server callback finishes
+         */
+        var progress = 0;
+        var startTime = Date.now();
+
+        /* Clear any previous interval */
+        if (window._progressInterval) clearInterval(window._progressInterval);
+
+        var stepLabels = [
+            'Parsing uploaded file…',
+            'Engineering behavioral features…',
+            'Running ML model prediction…',
+            'Generating charts & report…'
+        ];
+
+        window._progressInterval = setInterval(function() {
+            var elapsed = (Date.now() - startTime) / 1000;  /* seconds */
+
+            /* Adaptive speed: fast start, slow in middle, pause near end */
+            var target;
+            if      (elapsed < 1.5)  target = Math.min(10, elapsed * 7);
+            else if (elapsed < 12)   target = 10 + (elapsed - 1.5) * 3.33;
+            else if (elapsed < 18)   target = 45 + (elapsed - 12) * 4.17;
+            else if (elapsed < 24)   target = 70 + (elapsed - 18) * 3.67;
+            else                     target = Math.min(96, 92 + (elapsed - 24) * 0.15);
+
+            progress = Math.min(target, 96);
+            var pval = Math.round(progress);
+
+            if (fill) fill.style.width = pval + '%';
+            if (pct)  pct.textContent  = pval + '%';
+
+            /* Update step indicators */
+            var activeStep = 0;
+            if      (pval < 10)  activeStep = 0;
+            else if (pval < 45)  activeStep = 1;
+            else if (pval < 70)  activeStep = 2;
+            else                 activeStep = 3;
+
+            if (step) step.textContent = stepLabels[activeStep];
+            if (title && pval >= 92) title.textContent = 'Finalizing results…';
+
+            steps.forEach(function(s, i) {
+                if (!s) return;
+                if (i < activeStep)       s.className = 'pstep pstep-done';
+                else if (i === activeStep) s.className = 'pstep pstep-active';
+                else                       s.className = 'pstep';
+            });
+
+            /* Stop at 96% — the hide callback (results-section) will handle 100% */
+            if (progress >= 96) {
+                clearInterval(window._progressInterval);
+                window._progressInterval = null;
+            }
+        }, 200);
+
+        return window.dash_clientside.no_update;
+    }
+    """,
+    Output('processing-overlay', 'className'),
+    Input('_do-analysis', 'data'),
     prevent_initial_call=True,
 )
 

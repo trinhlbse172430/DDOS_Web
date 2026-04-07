@@ -1850,3 +1850,202 @@ input.dash-input-container[type="number"] {
     border: 1px solid rgba(255, 255, 255, 0.07);
     border-radius: 12px;
 }
+
+/* ═══════════════════════════════════════════════════════════════════
+   PROCESSING PROGRESS OVERLAY
+   ═══════════════════════════════════════════════════════════════════ */
+.processing-overlay {
+    display: none;               /* shown by JS */
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    z-index: 9998;
+    justify-content: center;
+    align-items: center;
+    background: rgba(3, 7, 18, 0.75);
+    backdrop-filter: blur(6px);
+    animation: overlayIn 0.35s ease forwards;
+}
+
+@keyframes overlayIn {
+    from { opacity: 0; transform: translateY(12px); }
+    to   { opacity: 1; transform: translateY(0); }
+}
+
+.progress-card {
+    width: 100%;
+    max-width: 520px;
+    background: linear-gradient(145deg, rgba(15, 23, 42, 0.95), rgba(17, 24, 39, 0.98));
+    border: 1px solid rgba(59, 130, 246, 0.25);
+    border-radius: 20px;
+    padding: 2.2rem 2.5rem 2rem;
+    text-align: center;
+    box-shadow:
+        0 20px 60px rgba(0, 0, 0, 0.5),
+        0 0 40px rgba(37, 99, 235, 0.08),
+        inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+/* ── Spinner ── */
+.progress-spinner-wrap {
+    display: flex;
+    justify-content: center;
+    margin-bottom: 1.2rem;
+}
+
+.progress-spinner {
+    width: 48px;
+    height: 48px;
+    border: 3px solid rgba(59, 130, 246, 0.15);
+    border-top: 3px solid #3B82F6;
+    border-radius: 50%;
+    animation: spin 0.9s linear infinite;
+}
+
+@keyframes spin {
+    to { transform: rotate(360deg); }
+}
+
+/* ── Title & subtitle ── */
+.progress-title {
+    color: #fff;
+    font-size: 1.15rem;
+    font-weight: 700;
+    margin: 0 0 0.35rem;
+    letter-spacing: 0.01em;
+}
+
+.progress-step-text {
+    color: rgba(255, 255, 255, 0.45);
+    font-size: 0.82rem;
+    margin: 0 0 1.3rem;
+    min-height: 1.2em;
+    transition: color 0.3s ease;
+}
+
+/* ── Progress bar ── */
+.progress-bar-track {
+    width: 100%;
+    height: 8px;
+    background: rgba(255, 255, 255, 0.06);
+    border-radius: 99px;
+    overflow: hidden;
+    margin-bottom: 0.5rem;
+}
+
+.progress-bar-fill {
+    height: 100%;
+    background: linear-gradient(90deg, #2563EB, #3B82F6, #60A5FA);
+    border-radius: 99px;
+    transition: width 0.35s ease;
+    box-shadow: 0 0 12px rgba(59, 130, 246, 0.4);
+    position: relative;
+}
+
+.progress-bar-fill::after {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: linear-gradient(
+        90deg,
+        transparent 0%,
+        rgba(255, 255, 255, 0.2) 50%,
+        transparent 100%
+    );
+    animation: shimmer 1.8s infinite;
+}
+
+@keyframes shimmer {
+    0%   { transform: translateX(-100%); }
+    100% { transform: translateX(100%); }
+}
+
+.progress-pct {
+    display: inline-block;
+    color: #60A5FA;
+    font-size: 0.85rem;
+    font-weight: 700;
+    font-family: 'JetBrains Mono', monospace;
+    margin-bottom: 1.2rem;
+}
+
+/* ── Step indicators ── */
+.progress-steps {
+    display: flex;
+    justify-content: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+}
+
+.pstep {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    padding: 0.3rem 0.7rem;
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    transition: all 0.4s ease;
+}
+
+.pstep-icon {
+    font-size: 0.8rem;
+}
+
+.pstep-label {
+    font-size: 0.7rem;
+    color: rgba(255, 255, 255, 0.3);
+    font-weight: 500;
+    transition: color 0.3s ease;
+}
+
+/* Active step */
+.pstep-active {
+    background: rgba(59, 130, 246, 0.1);
+    border-color: rgba(59, 130, 246, 0.35);
+    animation: stepPulse 1.5s ease-in-out infinite;
+}
+
+.pstep-active .pstep-label {
+    color: #60A5FA;
+    font-weight: 600;
+}
+
+@keyframes stepPulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(59, 130, 246, 0); }
+    50%      { box-shadow: 0 0 12px 2px rgba(59, 130, 246, 0.15); }
+}
+
+/* Completed step */
+.pstep-done {
+    background: rgba(74, 222, 128, 0.06);
+    border-color: rgba(74, 222, 128, 0.2);
+}
+
+.pstep-done .pstep-icon::after {
+    content: ' ✓';
+    font-size: 0.65rem;
+    color: #4ADE80;
+}
+
+.pstep-done .pstep-label {
+    color: rgba(74, 222, 128, 0.7);
+}
+
+/* ── Responsive ── */
+@media (max-width: 480px) {
+    .progress-card {
+        padding: 1.5rem 1.2rem 1.2rem;
+    }
+    .progress-steps {
+        gap: 0.35rem;
+    }
+    .pstep {
+        padding: 0.25rem 0.5rem;
+    }
+    .pstep-label {
+        font-size: 0.62rem;
+    }
+}
